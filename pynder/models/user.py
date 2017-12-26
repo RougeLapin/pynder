@@ -1,13 +1,14 @@
+import itertools
 import datetime
-
 import dateutil.parser
 import six
 
-from pynder.constants import GENDER_MAP, SIMPLE_FIELDS
+from pynder.models.base import Model
+from pynder.constants import GENDER_MAP, SIMPLE_FIELDS, VALID_PHOTO_SIZES
 from pynder.models.message import Message
 
 
-class User(object):
+class User(Model):
 
     def __init__(self, data, session):
         self._session = session
@@ -17,31 +18,26 @@ class User(object):
         for field in SIMPLE_FIELDS:
             setattr(self, field, data.get(field))
 
-        self.photos_obj = [photo for photo in data['photos']]
+        self._photos = data['photos']
         self.birth_date = dateutil.parser.parse(self.birth_date)
-        self.schools = []
-        self.schools_id = []
+        self.schools = {}
         self.jobs = []
         try:
-            self.schools.extend([school["name"] for school in data['schools']])
-            self.schools_id.extend([school["id"] for school in data['schools']])
-            self.jobs.extend(["%s @ %s" % (job["title"]["name"], job["company"][
-                             "name"]) for job in data['jobs'] if 'title' in job and 'company' in job])
-            self.jobs.extend(["%s" % (job["company"]["name"],) for job in data[
-                             'jobs'] if 'title' not in job and 'company' in job])
-            self.jobs.extend(["%s" % (job["title"]["name"],) for job in data[
-                             'jobs'] if 'title' in job and 'company' not in job])
-        except ValueError:
+            self.schools.update({school["id"]: school["name"] for school in data['schools'] if 'id' in school and 'name' in school})
+            self.jobs.extend(["%s @ %s" % (job["title"]["name"], job["company"]["name"]) for job in data['jobs'] if 'title' in job and 'company' in job])
+            self.jobs.extend(["%s" % (job["company"]["name"],) for job in data['jobs'] if 'title' not in job and 'company' in job])
+            self.jobs.extend(["%s" % (job["title"]["name"],) for job in data['jobs'] if 'title' in job and 'company' not in job])
+        except (ValueError, KeyError):
             pass
 
     @property
     def instagram_username(self):
-        if self._data.get("instagram", False):
+        if "instagram" in self._data:
             return self._data['instagram']['username']
 
     @property
     def instagram_photos(self):
-        if self._data.get("instagram", False):
+        if "instagram" in self._data:
             return [p for p in self._data['instagram']['photos']]
 
     @property
@@ -58,7 +54,7 @@ class User(object):
 
     @property
     def thumbnails(self):
-        return self.get_photos(width="84")
+        return self.get_photos(width=84)
 
     @property
     def photos(self):
@@ -66,10 +62,21 @@ class User(object):
 
     @property
     def distance_km(self):
-        if self._data.get("distance_mi", False) or self._data.get("distance_km", False):
-            return self._data.get('distance_km', self._data['distance_mi'] * 1.60934)
+        if 'distance_km' in self._data:
+            return self._data['distance_km']
+        elif 'distance_mi' in self._data:
+            return self._data['distance_mi'] * 1.60934
         else:
-            return 0
+            return -1
+
+    @property
+    def distance_mi(self):
+        if 'distance_mi' in self._data:
+            return self._data['distance_mi']
+        elif 'distance_km' in self._data:
+            return self._data['distance_km'] / 1.60934
+        else:
+            return -1
 
     @property
     def age(self):
@@ -77,6 +84,10 @@ class User(object):
         return (today.year - self.birth_date.year -
                 ((today.month, today.day) <
                  (self.birth_date.month, self.birth_date.day)))
+
+    @property
+    def share_link(self):
+        return self._session._api.share(self.id)['link']
 
     def __unicode__(self):
         return u"{n} ({a})".format(n=self.name, a=self.age)
@@ -87,26 +98,13 @@ class User(object):
     def __repr__(self):
         return repr(self.name)
 
-    def report(self, cause):
-        return self._session._api.report(self.id, cause)
+    def report(self, cause, text=""):
+        return self._session._api.report(self.id, cause, text)
 
-    def get_photos(self, width=None):
-        photos_list = []
-        for photo in self.photos_obj:
-            if width is None:
-                photos_list.append(photo.get("url"))
-            else:
-                sizes = ["84", "172", "320", "640"]
-                if width not in sizes:
-                    print("Only support these widths: %s" % sizes)
-                    return None
-                for p in photo.get("processedFiles", []):
-                    if p.get("width", 0) == int(width):
-                        photos_list.append(p.get("url", None))
-        return photos_list
-
-
-class Hopeful(User):
+    def get_photos(self, width=640):
+        if int(width) not in VALID_PHOTO_SIZES:
+            raise ValueError("Unsupported width")
+        return itertools.chain.from_iterable([[processed_photo['url'] for processed_photo in photo.get("processedFiles", []) if processed_photo['width'] == int(width)] for photo in self._photos])
 
     def like(self):
         return self._session._api.like(self.id)['match']
@@ -118,12 +116,20 @@ class Hopeful(User):
         return self._session._api.dislike(self.id)
 
 
-class Match(object):
+class RateLimited(User):
+
+    pass
+
+
+class Match(Model):
 
     def __init__(self, match, _session):
         self._session = _session
         self.id = match["_id"]
         self.user, self.messages = None, []
+        self.match_date = datetime.datetime.strptime(
+         match["created_date"], "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         if 'person' in match:
             user_data = _session._api.user_info(
                 match['person']['_id'])['results']
@@ -134,6 +140,12 @@ class Match(object):
 
     def message(self, body):
         return self._session._api.message(self.id, body)['_id']
+
+    def message_gif(self, giphy_id):
+        return self._session._api.message_gif(self.id, giphy_id)['_id']
+
+    def report(self, cause, text=""):
+        return self._session._api.report(self.id, cause, text)
 
     def delete(self):
         return self._session._api._delete('/user/matches/' + self.id)

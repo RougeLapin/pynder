@@ -2,8 +2,8 @@ from time import time
 from cached_property import cached_property
 
 import pynder.api as api
-from pynder.errors import InitializationError
-from pynder.models import Profile, Hopeful, Match, Friend
+from pynder.errors import InitializationError, RecsTimeout
+from pynder.models import Profile, User, RateLimited, Match, Friend
 
 
 class Session(object):
@@ -24,10 +24,16 @@ class Session(object):
     def nearby_users(self, limit=10):
         while True:
             response = self._api.recs(limit)
+
+            if 'message' in response and response['message'] == 'recs timeout':
+                raise RecsTimeout
+
             users = response['results'] if 'results' in response else []
             for user in users:
                 if not user["_id"].startswith("tinder_rate_limited_id_"):
-                    yield Hopeful(user, self)
+                    yield User(user, self)
+                else:
+                    yield RateLimited(user, self)
             if not len(users):
                 break
 
@@ -57,6 +63,10 @@ class Session(object):
     @property
     def likes_remaining(self):
         return self._api.meta()['rating']['likes_remaining']
+
+    @property
+    def super_likes_remaining(self):
+        return self._api.meta()['rating']['super_likes']['remaining']
 
     @property
     def can_like_in(self):
